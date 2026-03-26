@@ -22,12 +22,13 @@ import {
   Lock,
   Key
 } from 'lucide-react';
-import { ShiftHandover, AuthSession, Admin, AccessCode } from './types';
+import { ShiftHandover, AuthSession, Admin, AccessCode, AuditLog } from './types';
 import { ShiftCard } from './components/ShiftCard';
 import { ShiftForm } from './components/ShiftForm';
 import { PrintView } from './components/PrintView';
 import { TransferModal } from './components/TransferModal';
 import { DeathModal } from './components/DeathModal';
+import { DischargeModal } from './components/DischargeModal';
 import { LoginPortal } from './components/LoginPortal';
 import { AdminDashboard } from './components/AdminDashboard';
 import { motion, AnimatePresence } from 'motion/react';
@@ -37,13 +38,35 @@ import { ptBR } from 'date-fns/locale';
 import { translateDischargeType } from './lib/translations';
 
 export default function App() {
-  const [sectors, setSectors] = useState<string[]>(['UTI Adulto', 'UTI Pediátrica', 'Enfermaria A', 'Enfermaria B', 'Pronto Socorro', 'Centro Cirúrgico', 'Setor de Demonstração']);
-  const [shifts, setShifts] = useState<ShiftHandover[]>([]);
+  /* 
+   * PERSISTÊNCIA DE DADOS (DATABASE)
+   * Atualmente este sistema utiliza o LocalStorage do navegador para salvar os dados.
+   * Isso significa que as informações ficam salvas apenas no computador/celular onde foram inseridas.
+   * 
+   * PARA CONECTAR AO FIREBASE (Nuvem):
+   * 1. Crie um projeto no console.firebase.google.com
+   * 2. Adicione o SDK do Firebase ao projeto (npm install firebase)
+   * 3. Substitua os 'useEffect' abaixo por chamadas ao Firestore (db.collection('shifts').add(...))
+   * 4. Utilize o Firebase Auth para gerenciar os logins de forma segura.
+   */
+
+  // Load initial state from localStorage or use defaults
+  const [sectors, setSectors] = useState<string[]>(() => {
+    const saved = localStorage.getItem('enf_sectors');
+    return saved ? JSON.parse(saved) : ['UTI Adulto', 'UTI Pediátrica', 'Enfermaria A', 'Enfermaria B', 'Pronto Socorro', 'Centro Cirúrgico', 'Setor de Demonstração'];
+  });
+
+  const [shifts, setShifts] = useState<ShiftHandover[]>(() => {
+    const saved = localStorage.getItem('enf_shifts');
+    return saved ? JSON.parse(saved) : [];
+  });
   const [selectedSector, setSelectedSector] = useState<string | null>(null);
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [isPrintViewOpen, setIsPrintViewOpen] = useState(false);
+  const [shiftsToPrint, setShiftsToPrint] = useState<ShiftHandover[]>([]);
   const [transferringShift, setTransferringShift] = useState<ShiftHandover | undefined>(undefined);
   const [dyingShift, setDyingShift] = useState<ShiftHandover | undefined>(undefined);
+  const [dischargingShift, setDischargingShift] = useState<ShiftHandover | undefined>(undefined);
   const [editingShift, setEditingShift] = useState<ShiftHandover | undefined>();
   const [searchTerm, setSearchTerm] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>('all');
@@ -87,12 +110,30 @@ export default function App() {
 
   const [accessCodes, setAccessCodes] = useState<AccessCode[]>(() => {
     const saved = localStorage.getItem('enf_access_codes');
-    return saved ? JSON.parse(saved) : [];
+    if (!saved) return [];
+    
+    const codes: any[] = JSON.parse(saved);
+    // Migration: ensure all codes have 'sectors' array instead of single 'sector'
+    return codes.map(code => {
+      if (!code.sectors && code.sector) {
+        return {
+          ...code,
+          sectors: [code.sector]
+        };
+      }
+      return {
+        ...code,
+        sectors: code.sectors || []
+      };
+    });
   });
 
   const [isAdminDashboardOpen, setIsAdminDashboardOpen] = useState(false);
 
-  // Load initial mock data or from localStorage
+  // Persistence Effects
+  // These effects ensure that every change to the state is automatically saved to localStorage.
+  // To connect to a database like Firebase, you would replace these localStorage.setItem calls
+  // with database update functions (e.g., setDoc in Firestore).
   useEffect(() => {
     localStorage.setItem('enf_admins', JSON.stringify(admins));
   }, [admins]);
@@ -102,6 +143,14 @@ export default function App() {
   }, [accessCodes]);
 
   useEffect(() => {
+    localStorage.setItem('enf_sectors', JSON.stringify(sectors));
+  }, [sectors]);
+
+  useEffect(() => {
+    localStorage.setItem('enf_shifts', JSON.stringify(shifts));
+  }, [shifts]);
+
+  useEffect(() => {
     if (session) {
       localStorage.setItem('enf_session', JSON.stringify(session));
     } else {
@@ -109,25 +158,13 @@ export default function App() {
     }
   }, [session]);
 
+  // Initial Data Setup (Mock Data for Demo)
   useEffect(() => {
-    const savedSectors = localStorage.getItem('enf_sectors');
-    if (savedSectors) {
-      setSectors(JSON.parse(savedSectors));
-    }
-
-    const saved = localStorage.getItem('enf_shifts');
-    let currentShifts: ShiftHandover[] = [];
+    const hasDemo = shifts.some(s => s.sector === 'Setor de Demonstração');
     
-    if (saved) {
-      currentShifts = JSON.parse(saved);
-    }
-
-    // Check if demo patients are already there
-    const hasDemo = currentShifts.some(s => s.sector === 'Setor de Demonstração');
-    
-    if (!hasDemo) {
+    if (shifts.length === 0 && !hasDemo) {
       // Mock data for initial view if empty
-      const initialMock: ShiftHandover[] = saved ? [] : [
+      const initialMock: ShiftHandover[] = [
         {
           id: '1',
           bed: '101-A',
@@ -139,7 +176,7 @@ export default function App() {
           specialty: 'Clínica Médica',
           diagnosis: 'Pneumonia Comunitária, HAS, DM2.',
           allergies: 'Penicilina',
-          exams: 'RX Tórax (Infiltrado em base D), Hemograma (Leucocitose).',
+          pendingExams: ['RX Tórax', 'Hemograma'],
           completedExams: [],
           pending: 'Aguardando transporte para TC de Tórax às 14h.',
           devices: 'AVP em MSE (18/03), SVD (19/03).',
@@ -164,8 +201,8 @@ export default function App() {
           specialty: 'Cirúrgica',
           diagnosis: 'Pós-op imediato de Apendicectomia.',
           allergies: 'Nega Alergias',
-          exams: '',
-          completedExams: [{ name: 'Hemograma', completedAt: Date.now() }],
+          pendingExams: [],
+          completedExams: [{ id: 'mock-1', name: 'Hemograma', date: '22/03/2026 10:00', completedAt: Date.now() }],
           pending: '',
           devices: 'AVP em MSD (21/03).',
           dietType: 'Leve',
@@ -190,7 +227,7 @@ export default function App() {
           specialty: 'Intensivista',
           diagnosis: 'Choque Séptico de foco abdominal, Insuficiência Renal Aguda (IRA), DHE.',
           allergies: 'Nega Alergias',
-          exams: 'Gasometria (Acidose Metabólica), Lactato (4.5), Creatinina (3.2).',
+          pendingExams: ['Gasometria', 'Lactato', 'Creatinina'],
           completedExams: [],
           pending: 'Aguardando avaliação da Nefrologia para Hemodiálise.',
           devices: 'TOT (VM), CVC Subclávia D, PAI Radial E, SVD, SNE, Dreno de Penrose.',
@@ -232,8 +269,8 @@ export default function App() {
           specialty: 'Cardiologia',
           diagnosis: 'Pós-operatório imediato de Revascularização do Miocárdio (RM).',
           allergies: 'Iodo (Contraste)',
-          exams: 'ECG de controle (Ritmo Sinusal), Troponina em curva.',
-          completedExams: [{ name: 'RX de Tórax Leito', completedAt: Date.now() }],
+          pendingExams: ['ECG de controle', 'Troponina em curva'],
+          completedExams: [{ id: 'mock-2', name: 'RX de Tórax Leito', date: '22/03/2026 09:30', completedAt: Date.now() }],
           pending: 'Retirar dreno de mediastino amanhã se débito < 100ml.',
           devices: 'CVC Jugular Interna D, PAI Radial D, SVD, Dreno de Mediastino.',
           dietType: 'Leve para Cardiopata',
@@ -279,7 +316,7 @@ export default function App() {
         specialty: i % 2 === 0 ? 'Clínica Médica' : 'Cirurgia Geral',
         diagnosis: i % 3 === 0 ? 'Pneumonia, HAS, DM2' : i % 3 === 1 ? 'Pós-op Colecistectomia' : 'Insuficiência Cardíaca Congestiva',
         allergies: i % 4 === 0 ? 'Dipirona' : 'Nega alergias',
-        exams: 'Hemograma, Eletrólitos, RX Tórax.',
+        pendingExams: ['Hemograma', 'Eletrólitos', 'RX Tórax'],
         completedExams: [],
         pending: i % 5 === 0 ? 'Aguardando parecer da Cardiologia' : '',
         devices: 'AVP em MSD, SVD.',
@@ -304,34 +341,50 @@ export default function App() {
         updatedAt: Date.now()
       }));
 
-      const finalShifts = [...currentShifts, ...initialMock, ...demoPatients];
-      setShifts(finalShifts);
-      localStorage.setItem('enf_shifts', JSON.stringify(finalShifts));
-    } else {
-      setShifts(currentShifts);
+      setShifts([...initialMock, ...demoPatients]);
     }
   }, []);
 
-  const saveShifts = (newShifts: ShiftHandover[]) => {
-    setShifts(newShifts);
-    localStorage.setItem('enf_shifts', JSON.stringify(newShifts));
-  };
-
-  const handleAddSector = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (newSectorName.trim() && !sectors.includes(newSectorName.trim())) {
-      const updatedSectors = [...sectors, newSectorName.trim()];
-      setSectors(updatedSectors);
-      localStorage.setItem('enf_sectors', JSON.stringify(updatedSectors));
-      setNewSectorName('');
-    }
-  };
-
   const handleSave = (shift: ShiftHandover) => {
+    const now = Date.now();
+    const updatedShift = { ...shift, updatedAt: now };
+
     if (editingShift) {
-      saveShifts(shifts.map(s => s.id === shift.id ? shift : s));
+      // Create Audit Log
+      const changes: AuditLog['changes'] = [];
+      const fieldsToTrack = ['patientName', 'bed', 'sector', 'diagnosis', 'allergies', 'complexity', 'mobility', 'fallRisk', 'isRestrained'];
+      
+      fieldsToTrack.forEach(field => {
+        const oldVal = (editingShift as any)[field];
+        const newVal = (shift as any)[field];
+        if (oldVal !== newVal) {
+          changes.push({ field, oldValue: oldVal, newValue: newVal });
+        }
+      });
+
+      if (changes.length > 0) {
+        const newLog: AuditLog = {
+          id: now.toString(),
+          userName: session?.name || 'Sistema',
+          userRegistration: session?.registration || '000000',
+          timestamp: now,
+          changes
+        };
+        updatedShift.auditLogs = [...(shift.auditLogs || []), newLog];
+      }
+
+      setShifts(shifts.map(s => s.id === shift.id ? updatedShift : s));
     } else {
-      saveShifts([shift, ...shifts]);
+      // Initial Audit Log
+      const initialLog: AuditLog = {
+        id: now.toString(),
+        userName: session?.name || 'Sistema',
+        userRegistration: session?.registration || '000000',
+        timestamp: now,
+        changes: [{ field: 'Criação', oldValue: null, newValue: 'Paciente Admitido' }]
+      };
+      updatedShift.auditLogs = [initialLog];
+      setShifts([updatedShift, ...shifts]);
     }
     setIsFormOpen(false);
     setEditingShift(undefined);
@@ -343,9 +396,26 @@ export default function App() {
     setIsFormOpen(true);
   };
 
-  const handleDischarge = (shift: ShiftHandover) => {
+  const handlePrintSingle = (shift: ShiftHandover) => {
+    setShiftsToPrint([shift]);
+    setIsPrintViewOpen(true);
+  };
+
+  const handlePrintAll = () => {
+    // Importante: Filtra apenas pacientes ATIVOS (não arquivados) do setor selecionado
+    const activeSectorShifts = shifts.filter(s => s.sector === selectedSector && !s.isArchived);
+    setShiftsToPrint(activeSectorShifts);
+    setIsPrintViewOpen(true);
+  };
+
+  const handleTransfer = (shift: ShiftHandover) => {
     if (!canEdit) return;
     setTransferringShift(shift);
+  };
+
+  const handleHomeDischarge = (shift: ShiftHandover) => {
+    if (!canEdit) return;
+    setDischargingShift(shift);
   };
 
   const handleTransferConfirm = (shift: ShiftHandover, destinationSector: string, destinationBed: string) => {
@@ -380,10 +450,21 @@ export default function App() {
         destination: `${destinationSector}: ${destinationBed || 'N/A'}`,
         date: now
       } : undefined,
-      updatedAt: now
+      updatedAt: now,
+      auditLogs: [...(shift.auditLogs || []), {
+        id: now.toString(),
+        userName: session?.name || 'Sistema',
+        userRegistration: session?.registration || '000000',
+        timestamp: now,
+        changes: [{ 
+          field: isExternal ? 'Alta' : 'Transferência', 
+          oldValue: `${shift.sector} - ${shift.bed}`, 
+          newValue: `${destinationSector} - ${destinationBed || 'N/A'}` 
+        }]
+      }]
     };
 
-    saveShifts(shifts.map(s => s.id === shift.id ? updatedShift : s));
+    setShifts(shifts.map(s => s.id === shift.id ? updatedShift : s));
     setTransferringShift(undefined);
   };
 
@@ -417,9 +498,16 @@ export default function App() {
         type: 'death',
         date: now
       },
-      updatedAt: now
+      updatedAt: now,
+      auditLogs: [...(shift.auditLogs || []), {
+        id: now.toString(),
+        userName: session?.name || 'Sistema',
+        userRegistration: session?.registration || '000000',
+        timestamp: now,
+        changes: [{ field: 'Óbito', oldValue: null, newValue: 'Registro de Óbito' }]
+      }]
     };
-    saveShifts(shifts.map(s => s.id === shift.id ? updatedShift : s));
+    setShifts(shifts.map(s => s.id === shift.id ? updatedShift : s));
     setDyingShift(undefined);
   };
 
@@ -432,8 +520,34 @@ export default function App() {
     setAccessCodes([...accessCodes, newCode]);
   };
 
+  const handleAddSector = (e: React.FormEvent | string) => {
+    let name = '';
+    if (typeof e === 'string') {
+      name = e;
+    } else {
+      e.preventDefault();
+      name = newSectorName;
+    }
+
+    if (!name || sectors.includes(name)) return;
+    setSectors([...sectors, name]);
+    setNewSectorName('');
+  };
+
+  const handleDeleteSector = (name: string) => {
+    setSectors(sectors.filter(s => s !== name));
+  };
+
   const handleDeleteAccessCode = (id: string) => {
     setAccessCodes(accessCodes.filter(c => c.id !== id));
+  };
+
+  const handleAddAdmin = (newAdmin: Admin) => {
+    setAdmins([...admins, newAdmin]);
+  };
+
+  const handleDeleteAdmin = (registration: string) => {
+    setAdmins(admins.filter(a => a.registration !== registration));
   };
 
   const handleLogout = () => {
@@ -468,7 +582,7 @@ export default function App() {
     return <LoginPortal onLogin={setSession} admins={admins} accessCodes={accessCodes} />;
   }
 
-  const canEdit = session.type === 'admin' || session.category === 'Enfermeiro';
+  const canEdit = true; // Todos os profissionais podem editar, dar alta, etc.
 
   // Sector Selection Screen
   if (!selectedSector) {
@@ -491,7 +605,9 @@ export default function App() {
             {sectors.map((sector) => {
               const count = shifts.filter(s => s.sector === sector).length;
               const pendingCount = shifts.filter(s => s.sector === sector && s.pending).length;
-              const isLocked = session.type === 'guest' && session.sector !== 'all' && session.sector !== sector;
+              const isLocked = session.type === 'guest' && 
+                !(session.sectors || []).includes('all') && 
+                !(session.sectors || []).includes(sector);
               
               return (
                 <button
@@ -573,6 +689,27 @@ export default function App() {
             </button>
           </div>
         </motion.div>
+
+        {/* Admin Dashboard in Sector Selection */}
+        <AnimatePresence>
+          {isAdminDashboardOpen && (
+            <AdminDashboard
+              accessCodes={accessCodes}
+              sectors={sectors}
+              shifts={shifts}
+              admin={admins.find(a => a.registration === session?.registration) || admins[0]}
+              admins={admins}
+              onAddCode={handleAddAccessCode}
+              onDeleteCode={handleDeleteAccessCode}
+              onAddSector={handleAddSector}
+              onDeleteSector={handleDeleteSector}
+              onUpdateAdmin={handleUpdateAdmin}
+              onAddAdmin={handleAddAdmin}
+              onDeleteAdmin={handleDeleteAdmin}
+              onClose={() => setIsAdminDashboardOpen(false)}
+            />
+          )}
+        </AnimatePresence>
       </div>
     );
   }
@@ -597,9 +734,13 @@ export default function App() {
                 <div>
                   <h1 className="text-lg font-bold text-slate-800 leading-tight">{selectedSector}</h1>
                   <div className="flex items-center gap-1.5 mt-0.5">
-                    <div className="flex items-center gap-1 bg-slate-100 px-1.5 py-0.5 rounded-full">
+                    <div className="flex items-center gap-1.5 bg-slate-100 px-2 py-0.5 rounded-full">
                       {session.type === 'admin' ? <Shield size={8} className="text-slate-600" /> : <User size={8} className="text-slate-600" />}
                       <span className="text-[8px] font-bold text-slate-600 uppercase">{session.name}</span>
+                      <span className="text-slate-300 text-[8px]">|</span>
+                      <span className="text-[8px] font-bold text-slate-500 uppercase">{session.category}</span>
+                      <span className="text-slate-300 text-[8px]">|</span>
+                      <span className="text-[8px] font-bold text-slate-500 uppercase">Reg: {session.registration}</span>
                     </div>
                     <span className="text-slate-200 text-[8px]">•</span>
                     <p className="text-[8px] font-bold text-slate-400 uppercase tracking-widest">Senso de Enfermagem</p>
@@ -630,7 +771,7 @@ export default function App() {
                 Histórico
               </button>
               <button 
-                onClick={() => setIsPrintViewOpen(true)}
+                onClick={handlePrintAll}
                 className="flex items-center gap-2 px-4 py-2 text-xs font-bold text-slate-600 uppercase tracking-widest hover:bg-slate-100 rounded-lg transition-all"
               >
                 <Printer size={18} />
@@ -781,7 +922,8 @@ export default function App() {
                   <ShiftCard 
                     shift={shift} 
                     onEdit={handleEdit} 
-                    onDischarge={handleDischarge}
+                    onTransfer={handleTransfer}
+                    onHomeDischarge={handleHomeDischarge}
                     onDeath={handleDeath}
                     canEdit={canEdit}
                   />
@@ -843,10 +985,27 @@ export default function App() {
       <AnimatePresence>
         {isPrintViewOpen && (
           <PrintView 
-            shifts={shifts.filter(s => s.sector === selectedSector)}
+            shifts={shiftsToPrint}
             userName={session.name}
-            userCategory={session.type === 'admin' ? 'Administrador' : (session.category || 'Convidado')}
-            onClose={() => setIsPrintViewOpen(false)}
+            userCategory={session.type === 'admin' ? 'Administrador' : (session.category || 'Profissional')}
+            onClose={() => {
+              setIsPrintViewOpen(false);
+              setShiftsToPrint([]);
+            }}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Discharge Modal */}
+      <AnimatePresence>
+        {dischargingShift && (
+          <DischargeModal 
+            shift={dischargingShift}
+            onConfirm={(shift) => {
+              handleTransferConfirm(shift, 'Alta Hospitalar', '');
+              setDischargingShift(undefined);
+            }}
+            onClose={() => setDischargingShift(undefined)}
           />
         )}
       </AnimatePresence>
@@ -881,10 +1040,16 @@ export default function App() {
           <AdminDashboard
             accessCodes={accessCodes}
             sectors={sectors}
-            admin={admins.find(a => a.registration === session.registration) || admins[0]}
+            shifts={shifts}
+            admin={admins.find(a => a.registration === session?.registration) || admins[0]}
+            admins={admins}
             onAddCode={handleAddAccessCode}
             onDeleteCode={handleDeleteAccessCode}
+            onAddSector={handleAddSector}
+            onDeleteSector={handleDeleteSector}
             onUpdateAdmin={handleUpdateAdmin}
+            onAddAdmin={handleAddAdmin}
+            onDeleteAdmin={handleDeleteAdmin}
             onClose={() => setIsAdminDashboardOpen(false)}
           />
         )}
